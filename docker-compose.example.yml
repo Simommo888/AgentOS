@@ -1,0 +1,25 @@
+version: "3.9"
+
+services:
+  agentos-backend:
+    image: python:3.11-slim
+    working_dir: /app/backend
+    command: sh -c "pip install -r requirements.txt && python -m app.seed && uvicorn main:app --host 0.0.0.0 --port 8000"
+    volumes:
+      - ./:/app
+      - ../:/workspace
+    env_file:
+      - .env
+    ports:
+      - "8000:8000"
+
+  agentos-frontend:
+    image: node:20-alpine
+    working_dir: /app/frontend
+    command: sh -c "npm install && npm run dev -- --hostname 0.0.0.0"
+    volumes:
+      - ./:/app
+    environment:
+      NEXT_PUBLIC_AGENTOS_API_BASE: http://localhost:8000
+    ports:
+      - "3000:3000"
