@@ -5,7 +5,8 @@ from pathlib import Path
 from sqlalchemy.orm import Session
 
 from app.models import KnowledgeAsset
-from app.services.settings_service import runtime_default_output_dir, runtime_kb_root
+from app.services.runtime_config import DEFAULT_EXCLUDED_DIRS, DEFAULT_EXCLUDED_FILES
+from app.services.settings_service import runtime_default_output_dir, runtime_kb_root, runtime_kb_scan_settings
 from app.utils.file_utils import safe_read_text
 from app.utils.paths import resolve_kb_relative
 
@@ -21,41 +22,20 @@ CATEGORY_DIRS = {
     "AgentOS": "04_Resources/AgentOS",
 }
 
-EXCLUDED_DIR_NAMES = {
-    "node_modules",
-    ".next",
-    ".git",
-    "__pycache__",
-    ".venv",
-    "venv",
-    "env",
-    "dist",
-    "build",
-    ".pytest_cache",
-    ".mypy_cache",
-    ".turbo",
-    "coverage",
-    ".trash",
-}
-
-EXCLUDED_FILE_PATTERNS = {
-    "*.pyc",
-    "*.log",
-    "*.tmp",
-    "package-lock.json",
-    "yarn.lock",
-    "pnpm-lock.yaml",
-    ".obsidian/workspace.json",
-}
+EXCLUDED_DIR_NAMES = set(DEFAULT_EXCLUDED_DIRS)
+EXCLUDED_FILE_PATTERNS = set(DEFAULT_EXCLUDED_FILES)
 
 
 def get_kb_config() -> dict:
+    scan_settings = runtime_kb_scan_settings()
     return {
         "knowledge_base_root": str(runtime_kb_root()),
         "categories": CATEGORY_DIRS,
         "default_output_dir": runtime_default_output_dir(),
-        "excluded_dirs": sorted(EXCLUDED_DIR_NAMES),
-        "excluded_files": sorted(EXCLUDED_FILE_PATTERNS),
+        "excluded_dirs": scan_settings["excluded_dirs"],
+        "excluded_files": scan_settings["excluded_files"],
+        "max_recent_files": scan_settings["max_recent_files"],
+        "default_asset_limit": scan_settings["default_asset_limit"],
     }
 
 
@@ -67,15 +47,17 @@ def _normalized_relative(path: Path, root: Path) -> str:
 
 
 def _is_excluded_dir(path: Path, root: Path) -> bool:
-    if path.name in EXCLUDED_DIR_NAMES:
+    excluded_dirs = set(runtime_kb_scan_settings()["excluded_dirs"])
+    if path.name in excluded_dirs:
         return True
     relative = _normalized_relative(path, root)
-    return any(part in EXCLUDED_DIR_NAMES for part in relative.split("/"))
+    return any(part in excluded_dirs for part in relative.split("/"))
 
 
 def _is_excluded_file(path: Path, root: Path) -> bool:
+    excluded_files = runtime_kb_scan_settings()["excluded_files"]
     relative = _normalized_relative(path, root)
-    return any(fnmatch.fnmatch(path.name, pattern) or fnmatch.fnmatch(relative, pattern) for pattern in EXCLUDED_FILE_PATTERNS)
+    return any(fnmatch.fnmatch(path.name, pattern) or fnmatch.fnmatch(relative, pattern) for pattern in excluded_files)
 
 
 def _iter_markdown_files(root: Path) -> list[Path]:
@@ -147,6 +129,7 @@ def _file_metadata(path: Path, root: Path) -> dict:
 
 def scan_recent_markdown(limit: int = 50, category: str | None = None, search: str | None = None) -> list[dict]:
     root = runtime_kb_root()
+    limit = min(limit, runtime_kb_scan_settings()["max_recent_files"])
     files = _iter_markdown_files(root)
     if category:
         category_path = CATEGORY_DIRS.get(category, category)

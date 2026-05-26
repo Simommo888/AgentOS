@@ -18,6 +18,10 @@ export type Agent = {
   updated_at: string;
   last_run_at?: string | null;
   last_run_status: string;
+  timeout_seconds: number;
+  retry_enabled: boolean;
+  max_retries: number;
+  retry_delay_seconds: number;
 };
 
 export type AgentRun = {
@@ -34,6 +38,53 @@ export type AgentRun = {
   output_files_json: string;
   error_message: string;
   created_at: string;
+  retry_count: number;
+  parent_run_id?: number | null;
+  timeout_seconds?: number | null;
+  cancelled_by: string;
+  metadata_json: string;
+  llm_provider: string;
+  llm_model: string;
+  prompt_tokens: number;
+  completion_tokens: number;
+  total_tokens: number;
+  estimated_cost: number;
+  cost_currency: string;
+};
+
+export type RunDetail = AgentRun & {
+  agent?: Agent | null;
+  logs: AgentLog[];
+  knowledge_assets: KnowledgeAsset[];
+};
+
+export type RunArtifact = {
+  title: string;
+  file_path: string;
+  asset_type: string;
+  file_exists: boolean;
+  file_size: number;
+  modified_at?: number | null;
+  preview: string;
+  warning: string;
+  readable: boolean;
+};
+
+export type LLMUsage = {
+  llm_provider: string;
+  llm_model: string;
+  prompt_tokens: number;
+  completion_tokens: number;
+  total_tokens: number;
+  estimated_cost: number;
+  cost_currency: string;
+};
+
+export type RunOutput = {
+  stdout: string;
+  stderr: string;
+  output_summary: string;
+  error_message: string;
 };
 
 export type AgentRunStart = {
@@ -53,6 +104,8 @@ export type RunQueueItem = {
   command: string;
   output_summary: string;
   error_message: string;
+  retry_count: number;
+  timeout_seconds?: number | null;
 };
 
 export type RunQueue = {
@@ -61,8 +114,48 @@ export type RunQueue = {
   recently_finished_runs: RunQueueItem[];
   active_count: number;
   pending_count: number;
+  running_count: number;
+  max_concurrent_runs: number;
   failed_count_today: number;
   success_count_today: number;
+};
+
+export type AgentMetrics = {
+  agent_id: string;
+  total_runs: number;
+  success_runs: number;
+  failed_runs: number;
+  cancelled_runs: number;
+  timeout_runs: number;
+  success_rate: number;
+  failure_rate: number;
+  average_duration_seconds: number;
+  last_run_at?: string | null;
+  last_success_at?: string | null;
+  last_failed_at?: string | null;
+  total_generated_assets: number;
+  total_estimated_cost: number;
+  total_tokens: number;
+  recent_7_days_runs: number;
+  recent_7_days_success_rate: number;
+};
+
+export type MetricsOverview = {
+  total_agents: number;
+  enabled_agents: number;
+  total_runs: number;
+  runs_today: number;
+  success_today: number;
+  failed_today: number;
+  cancelled_today: number;
+  running_count: number;
+  pending_count: number;
+  total_generated_assets: number;
+  average_duration_seconds: number;
+  total_estimated_cost: number;
+  total_tokens: number;
+  recent_7_days_runs: number;
+  recent_7_days_success_rate: number;
 };
 
 export type AgentLog = {
@@ -152,6 +245,12 @@ export type Settings = {
   database_url: string;
   required_env: string[];
   security_notes: string[];
+  max_concurrent_runs: number;
+  default_timeout_seconds: number;
+  excluded_dirs: string[];
+  excluded_files: string[];
+  max_recent_files: number;
+  default_asset_limit: number;
 };
 
 export type AgentHealth = {

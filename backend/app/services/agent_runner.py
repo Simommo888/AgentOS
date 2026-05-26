@@ -1,21 +1,21 @@
 import json
 import os
+import signal
 import subprocess
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Any
 from threading import Lock, Thread
+from typing import Any
 
 from sqlalchemy.orm import Session
 
-from app.config import settings
 from app.database import SessionLocal
 from app.models import Agent, AgentRun
 from app.services.knowledge_base_service import record_assets_for_files, scan_agent_output
 from app.services.log_service import create_log
 from app.services.security_service import SecurityError, build_safe_command, mask_secrets
-from app.services.settings_service import runtime_kb_root, runtime_python_path
+from app.services.settings_service import runtime_default_timeout_seconds, runtime_kb_root, runtime_max_concurrent_runs, runtime_python_path
 from app.utils.paths import resolve_kb_relative
 
 RUN_PENDING = "pending"
@@ -24,11 +24,14 @@ RUN_SUCCESS = "success"
 RUN_FAILED = "failed"
 RUN_CANCELLED = "cancelled"
 ACTIVE_STATUSES = (RUN_PENDING, RUN_RUNNING)
+TERMINAL_STATUSES = (RUN_SUCCESS, RUN_FAILED, RUN_CANCELLED)
 
 _running_agents: set[str] = set()
 _running_lock = Lock()
-running_processes: dict[int, dict[str, Any]] = {}
+_queue_lock = Lock()
 _process_lock = Lock()
+_dispatching_runs: set[int] = set()
+running_processes: dict[int, dict[str, Any]] = {}
 
 
 def _extract_summary(stdout: str, stderr: str, output_files: list[str], status: str) -> str:
@@ -131,7 +134,39 @@ def _prepare_command(agent: Agent) -> tuple[list[str], list[str]]:
     return command, notices
 
 
-def _fail_run(
+def _agent_timeout(agent: Agent) -> int:
+    return max(1, int(agent.timeout_seconds or runtime_default_timeout_seconds()))
+
+
+def _popen_kwargs() -> dict:
+    if os.name == "nt":
+        return {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
+    return {"preexec_fn": os.setsid}
+
+
+def _terminate_process_group(process: subprocess.Popen[str], run_id: int, agent_id: str, db: Session) -> None:
+    if process.poll() is not None:
+        return
+    try:
+        if os.name == "nt":
+            process.send_signal(signal.CTRL_BREAK_EVENT)
+        else:
+            os.killpg(os.getpgid(process.pid), signal.SIGTERM)
+        process.wait(timeout=5)
+        return
+    except Exception as exc:
+        create_log(db, agent_id, f"Process-group termination failed for run #{run_id}: {mask_secrets(str(exc))}", "warning", run_id)
+
+    if process.poll() is None:
+        process.terminate()
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=5)
+
+
+def _set_run_failed(
     db: Session,
     run: AgentRun,
     agent: Agent,
@@ -152,8 +187,43 @@ def _fail_run(
     agent.last_run_at = finished_at
     db.commit()
     create_log(db, agent.id, f"Run failed: {run.error_message}", "error", run.id)
+    _schedule_retry_if_needed(db, run, agent)
     db.refresh(run)
     return run
+
+
+def _schedule_retry_if_needed(db: Session, run: AgentRun, agent: Agent) -> AgentRun | None:
+    if run.status != RUN_FAILED:
+        return None
+    if not agent.retry_enabled:
+        return None
+    if int(run.retry_count or 0) >= int(agent.max_retries or 0):
+        return None
+
+    retry_count = int(run.retry_count or 0) + 1
+    retry_run = AgentRun(
+        agent_id=agent.id,
+        status=RUN_PENDING,
+        started_at=datetime.utcnow(),
+        command=agent.command,
+        retry_count=retry_count,
+        parent_run_id=run.parent_run_id or run.id,
+        timeout_seconds=_agent_timeout(agent),
+        metadata_json=json.dumps({"retry_delay_seconds": agent.retry_delay_seconds}, ensure_ascii=False),
+    )
+    db.add(retry_run)
+    db.commit()
+    db.refresh(retry_run)
+    create_log(db, agent.id, f"Retry scheduled: attempt {retry_count}/{agent.max_retries}.", "warning", retry_run.id)
+    delay = max(0, int(agent.retry_delay_seconds or 0))
+    Thread(target=_delayed_dispatch, args=(delay,), daemon=True).start()
+    return retry_run
+
+
+def _delayed_dispatch(delay: int) -> None:
+    if delay:
+        time.sleep(delay)
+    dispatch_pending_runs()
 
 
 def _mark_stale_run(db: Session, run: AgentRun, agent: Agent | None = None) -> AgentRun:
@@ -219,7 +289,7 @@ def create_pending_run(db: Session, agent_id: str, force: bool = False) -> Agent
     )
     with _running_lock:
         if not force and (agent_id in _running_agents or active_run):
-            raise ValueError("该 Agent 正在运行，请等待完成后再试。")
+            raise ValueError("该 Agent 正在运行或排队，请等待完成后再试。")
         _running_agents.add(agent_id)
 
     now = datetime.utcnow()
@@ -228,6 +298,9 @@ def create_pending_run(db: Session, agent_id: str, force: bool = False) -> Agent
         status=RUN_PENDING,
         started_at=now,
         command=agent.command,
+        retry_count=0,
+        timeout_seconds=_agent_timeout(agent),
+        metadata_json=json.dumps({"queued_at": now.isoformat()}, ensure_ascii=False),
     )
     db.add(run)
     agent.last_run_status = RUN_PENDING
@@ -236,6 +309,34 @@ def create_pending_run(db: Session, agent_id: str, force: bool = False) -> Agent
     db.refresh(run)
     create_log(db, agent.id, "Run created", "info", run.id)
     return run
+
+
+def dispatch_pending_runs() -> int:
+    started = 0
+    with _queue_lock:
+        db = SessionLocal()
+        try:
+            max_concurrent = runtime_max_concurrent_runs()
+            running_count = len(running_processes) + len(_dispatching_runs)
+            slots = max(0, max_concurrent - running_count)
+            if slots == 0:
+                return 0
+            pending_runs = (
+                db.query(AgentRun)
+                .filter(AgentRun.status == RUN_PENDING)
+                .order_by(AgentRun.started_at.asc(), AgentRun.id.asc())
+                .limit(slots)
+                .all()
+            )
+            for run in pending_runs:
+                if run.id in _dispatching_runs:
+                    continue
+                _dispatching_runs.add(run.id)
+                Thread(target=_execute_existing_run, args=(run.id,), daemon=True).start()
+                started += 1
+            return started
+        finally:
+            db.close()
 
 
 def _execute_existing_run(run_id: int) -> AgentRun | None:
@@ -256,8 +357,10 @@ def _execute_existing_run(run_id: int) -> AgentRun | None:
         agent_id = agent.id
         started_at = datetime.utcnow()
         start_ts = time.time()
+        timeout_seconds = int(run.timeout_seconds or _agent_timeout(agent))
         run.status = RUN_RUNNING
         run.started_at = started_at
+        run.timeout_seconds = timeout_seconds
         run.command = agent.command
         run.error_message = ""
         agent.last_run_status = RUN_RUNNING
@@ -269,7 +372,7 @@ def _execute_existing_run(run_id: int) -> AgentRun | None:
             _preflight_agent(agent)
         except Exception as exc:
             create_log(db, agent.id, "Preflight failed", "error", run.id)
-            return _fail_run(db, run, agent, started_at, mask_secrets(str(exc)))
+            return _set_run_failed(db, run, agent, started_at, mask_secrets(str(exc)))
 
         create_log(db, agent.id, "Preflight passed", "info", run.id)
         command, notices = _prepare_command(agent)
@@ -279,6 +382,7 @@ def _execute_existing_run(run_id: int) -> AgentRun | None:
         run.command = " ".join(command)
         db.commit()
         create_log(db, agent.id, f"Command started: {' '.join(command)}", "info", run.id)
+
         process: subprocess.Popen[str] | None = None
         try:
             process = subprocess.Popen(
@@ -288,6 +392,7 @@ def _execute_existing_run(run_id: int) -> AgentRun | None:
                 stderr=subprocess.PIPE,
                 text=True,
                 shell=False,
+                **_popen_kwargs(),
             )
             with _process_lock:
                 running_processes[run.id] = {
@@ -295,21 +400,21 @@ def _execute_existing_run(run_id: int) -> AgentRun | None:
                     "process": process,
                     "started_at": started_at,
                 }
-            stdout_raw, stderr_raw = process.communicate(timeout=settings.command_timeout_seconds)
+            stdout_raw, stderr_raw = process.communicate(timeout=timeout_seconds)
             return_code = process.returncode
-        except subprocess.TimeoutExpired as exc:
+        except subprocess.TimeoutExpired:
             if process:
-                process.kill()
+                _terminate_process_group(process, run.id, agent.id, db)
                 timeout_stdout, timeout_stderr = process.communicate()
             else:
-                timeout_stdout, timeout_stderr = exc.stdout or "", exc.stderr or ""
-            create_log(db, agent.id, "Command finished: timeout", "error", run.id)
-            return _fail_run(
+                timeout_stdout, timeout_stderr = "", ""
+            create_log(db, agent.id, f"Run timed out after {timeout_seconds} seconds.", "error", run.id)
+            return _set_run_failed(
                 db,
                 run,
                 agent,
                 started_at,
-                f"Agent timed out after {settings.command_timeout_seconds} seconds.",
+                f"Run timed out after {timeout_seconds} seconds.",
                 stdout=timeout_stdout or "",
                 stderr=timeout_stderr or "",
             )
@@ -365,26 +470,33 @@ def _execute_existing_run(run_id: int) -> AgentRun | None:
 
         db.commit()
         create_log(db, agent.id, "Run success" if status == RUN_SUCCESS else "Run failed", "info" if status == RUN_SUCCESS else "error", run.id)
+        if status == RUN_FAILED:
+            _schedule_retry_if_needed(db, run, agent)
         db.refresh(run)
         return run
     except Exception as exc:
         run = db.query(AgentRun).filter(AgentRun.id == run_id).first()
         agent = db.query(Agent).filter(Agent.id == run.agent_id).first() if run else None
         if run and agent:
-            return _fail_run(db, run, agent, run.started_at or datetime.utcnow(), mask_secrets(str(exc)))
+            return _set_run_failed(db, run, agent, run.started_at or datetime.utcnow(), mask_secrets(str(exc)))
         return run
     finally:
         if agent_id:
             with _running_lock:
-                _running_agents.discard(agent_id)
+                active = db.query(AgentRun).filter(AgentRun.agent_id == agent_id, AgentRun.status.in_(ACTIVE_STATUSES)).first()
+                if not active:
+                    _running_agents.discard(agent_id)
         with _process_lock:
             running_processes.pop(run_id, None)
+        with _queue_lock:
+            _dispatching_runs.discard(run_id)
         db.close()
+        dispatch_pending_runs()
 
 
 def start_agent_run(db: Session, agent_id: str, force: bool = False) -> AgentRun:
     run = create_pending_run(db, agent_id, force=force)
-    Thread(target=_execute_existing_run, args=(run.id,), daemon=True).start()
+    dispatch_pending_runs()
     return run
 
 
@@ -409,26 +521,41 @@ def cancel_run(db: Session, run_id: int) -> AgentRun:
     with _process_lock:
         entry = running_processes.get(run_id)
 
+    if run.status == RUN_PENDING and not entry:
+        finished_at = datetime.utcnow()
+        run.status = RUN_CANCELLED
+        run.finished_at = finished_at
+        run.duration_seconds = (finished_at - (run.started_at or run.created_at or finished_at)).total_seconds()
+        run.error_message = "Run cancelled by user."
+        run.output_summary = "Run cancelled by user."
+        run.cancelled_by = "user"
+        if agent:
+            agent.last_run_status = RUN_CANCELLED
+            agent.last_run_at = finished_at
+        db.commit()
+        create_log(db, run.agent_id, "Pending run cancelled by user.", "warning", run.id)
+        with _running_lock:
+            _running_agents.discard(run.agent_id)
+        db.refresh(run)
+        dispatch_pending_runs()
+        return run
+
     if not entry:
         _mark_stale_run(db, run, agent)
+        dispatch_pending_runs()
         return run
 
     process: subprocess.Popen[str] = entry["process"]
     run.status = RUN_CANCELLED
     run.error_message = "Run cancelled by user."
     run.output_summary = "Run cancelled by user."
+    run.cancelled_by = "user"
     if agent:
         agent.last_run_status = RUN_CANCELLED
         agent.last_run_at = datetime.utcnow()
     db.commit()
     create_log(db, run.agent_id, "Run cancellation requested by user.", "warning", run.id)
-    if process.poll() is None:
-        process.terminate()
-        try:
-            process.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            process.kill()
-            process.wait(timeout=5)
+    _terminate_process_group(process, run.id, run.agent_id, db)
 
     finished_at = datetime.utcnow()
     started_at = run.started_at or run.created_at or finished_at
@@ -437,6 +564,7 @@ def cancel_run(db: Session, run_id: int) -> AgentRun:
     run.duration_seconds = (finished_at - started_at).total_seconds()
     run.error_message = "Run cancelled by user."
     run.output_summary = "Run cancelled by user."
+    run.cancelled_by = "user"
     if agent:
         agent.last_run_status = RUN_CANCELLED
         agent.last_run_at = finished_at
@@ -447,4 +575,5 @@ def cancel_run(db: Session, run_id: int) -> AgentRun:
     with _running_lock:
         _running_agents.discard(run.agent_id)
     db.refresh(run)
+    dispatch_pending_runs()
     return run

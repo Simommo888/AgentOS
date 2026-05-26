@@ -1,7 +1,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api import agents, knowledge_base, logs, prompts, runs, schedules, settings, tools
+from app.api import agents, knowledge_base, logs, metrics, prompts, runs, schedules, settings, tools
 from app.database import init_db
 from app.seed import seed_database
 from app.services.agent_runner import repair_stale_runs
@@ -39,3 +39,4 @@ app.include_router(schedules.router, prefix="/api/schedules", tags=["schedules"]
 app.include_router(knowledge_base.router, prefix="/api/knowledge-base", tags=["knowledge-base"])
 app.include_router(tools.router, prefix="/api/tools", tags=["tools"])
 app.include_router(settings.router, prefix="/api/settings", tags=["settings"])
+app.include_router(metrics.router, prefix="/api/metrics", tags=["metrics"])

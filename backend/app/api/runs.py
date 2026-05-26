@@ -1,13 +1,18 @@
+import json
+import time as time_module
 from datetime import date as date_type
 from datetime import datetime, time
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
-from app.database import get_db
-from app.models import Agent, AgentLog, AgentRun
-from app.schemas import AgentLogRead, AgentRunQueueRead, AgentRunRead
-from app.services.agent_runner import ACTIVE_STATUSES, RUN_PENDING, RUN_RUNNING, cancel_run
+from app.database import SessionLocal, get_db
+from app.models import Agent, AgentLog, AgentRun, KnowledgeAsset
+from app.schemas import AgentLogRead, AgentRunDetailRead, AgentRunQueueRead, AgentRunRead, RunArtifactRead
+from app.services.agent_runner import ACTIVE_STATUSES, RUN_PENDING, RUN_RUNNING, TERMINAL_STATUSES, cancel_run
+from app.services.run_artifact_service import run_artifacts
+from app.services.settings_service import runtime_max_concurrent_runs
 
 router = APIRouter()
 
@@ -27,6 +32,8 @@ def _queue_item(run: AgentRun, agent_name: str = "") -> dict:
         "command": run.command,
         "output_summary": run.output_summary,
         "error_message": run.error_message,
+        "retry_count": run.retry_count or 0,
+        "timeout_seconds": run.timeout_seconds,
     }
 
 
@@ -56,6 +63,8 @@ def get_run_queue(db: Session = Depends(get_db)) -> dict:
         "recently_finished_runs": [_queue_item(run, agent_names.get(run.agent_id, "")) for run in finished],
         "active_count": len(pending) + len(running),
         "pending_count": len(pending),
+        "running_count": len(running),
+        "max_concurrent_runs": runtime_max_concurrent_runs(),
         "failed_count_today": failed_today,
         "success_count_today": success_today,
     }
@@ -80,12 +89,25 @@ def list_runs(
     return query.order_by(AgentRun.started_at.desc()).limit(limit).all()
 
 
-@router.get("/{run_id}", response_model=AgentRunRead)
-def get_run(run_id: int, db: Session = Depends(get_db)) -> AgentRun:
+@router.get("/{run_id}", response_model=AgentRunDetailRead)
+def get_run(run_id: int, db: Session = Depends(get_db)) -> dict:
     run = db.query(AgentRun).filter(AgentRun.id == run_id).first()
     if not run:
         raise HTTPException(status_code=404, detail="Run not found")
-    return run
+    return {
+        **run.__dict__,
+        "agent": run.agent,
+        "logs": db.query(AgentLog).filter(AgentLog.run_id == run_id).order_by(AgentLog.timestamp.asc()).all(),
+        "knowledge_assets": db.query(KnowledgeAsset).filter(KnowledgeAsset.run_id == run_id).order_by(KnowledgeAsset.created_at.desc()).all(),
+    }
+
+
+@router.get("/{run_id}/artifacts", response_model=list[RunArtifactRead])
+def get_run_artifacts(run_id: int, db: Session = Depends(get_db)) -> list[dict]:
+    run = db.query(AgentRun).filter(AgentRun.id == run_id).first()
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+    return run_artifacts(db, run_id)
 
 
 @router.post("/{run_id}/cancel", response_model=AgentRunRead)
@@ -99,3 +121,42 @@ def cancel_run_api(run_id: int, db: Session = Depends(get_db)) -> AgentRun:
 @router.get("/{run_id}/logs", response_model=list[AgentLogRead])
 def get_run_logs(run_id: int, db: Session = Depends(get_db)) -> list[AgentLog]:
     return db.query(AgentLog).filter(AgentLog.run_id == run_id).order_by(AgentLog.timestamp.asc()).all()
+
+
+@router.get("/{run_id}/logs/stream")
+def stream_run_logs(run_id: int) -> StreamingResponse:
+    def event_stream():
+        last_id = 0
+        while True:
+            db = SessionLocal()
+            try:
+                logs = (
+                    db.query(AgentLog)
+                    .filter(AgentLog.run_id == run_id, AgentLog.id > last_id)
+                    .order_by(AgentLog.id.asc())
+                    .all()
+                )
+                for log in logs:
+                    last_id = log.id
+                    payload = {
+                        "id": log.id,
+                        "run_id": log.run_id,
+                        "agent_id": log.agent_id,
+                        "level": log.level,
+                        "message": log.message,
+                        "timestamp": log.timestamp.isoformat(),
+                        "metadata_json": log.metadata_json,
+                    }
+                    yield f"event: log\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
+                run = db.query(AgentRun).filter(AgentRun.id == run_id).first()
+                if not run:
+                    yield "event: error\ndata: {\"message\":\"Run not found\"}\n\n"
+                    break
+                if run.status in TERMINAL_STATUSES:
+                    yield f"event: completed\ndata: {json.dumps({'run_id': run.id, 'status': run.status}, ensure_ascii=False)}\n\n"
+                    break
+            finally:
+                db.close()
+            time_module.sleep(1)
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream")

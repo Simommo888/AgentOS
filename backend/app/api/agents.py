@@ -3,10 +3,11 @@ from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.models import Agent
-from app.schemas import AgentCreate, AgentHealthRead, AgentRead, AgentRunStartRead, AgentUpdate
+from app.schemas import AgentCreate, AgentHealthRead, AgentMetricsRead, AgentRead, AgentRunStartRead, AgentUpdate
 from app.services.agent_registry import create_agent, get_agent, list_agents, update_agent
 from app.services.agent_health import agent_health
 from app.services.agent_runner import start_agent_run
+from app.services.metrics_service import agent_metrics
 
 router = APIRouter()
 
@@ -30,6 +31,14 @@ def get_agent_health(agent_id: str, db: Session = Depends(get_db)) -> dict:
     if not agent:
         raise HTTPException(status_code=404, detail="Agent not found")
     return agent_health(db, agent)
+
+
+@router.get("/{agent_id}/metrics", response_model=AgentMetricsRead)
+def get_agent_metrics(agent_id: str, db: Session = Depends(get_db)) -> dict:
+    agent = get_agent(db, agent_id)
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent not found")
+    return agent_metrics(db, agent_id)
 
 
 @router.post("", response_model=AgentRead)

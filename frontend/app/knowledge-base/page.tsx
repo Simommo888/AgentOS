@@ -17,6 +17,8 @@ type KbConfig = {
   default_output_dir: string;
   excluded_dirs?: string[];
   excluded_files?: string[];
+  max_recent_files?: number;
+  default_asset_limit?: number;
 };
 
 const categoryOptions = [
@@ -34,6 +36,7 @@ function AssetRow({ item, onOpen }: { item: KnowledgeAsset | RecentFile; onOpen:
   const missing = item.file_exists === false;
   const empty = item.is_empty === true || item.file_empty === true;
   const size = item.file_size ?? 0;
+
   return (
     <div className="rounded-md border p-3">
       <div className="flex items-start justify-between gap-3">
@@ -69,7 +72,7 @@ export default function KnowledgeBasePage() {
   const [message, setMessage] = useState("");
 
   async function load() {
-    const params = { category, search, limit: 50 };
+    const params = { category, search };
     const [configData, assetData, recentData] = await Promise.all([
       api.kbConfig(),
       api.assets(params),
@@ -126,7 +129,12 @@ export default function KnowledgeBasePage() {
           </Select>
           <div className="relative">
             <Search className="pointer-events-none absolute left-3 top-2.5 size-4 text-muted-foreground" />
-            <Input className="pl-9" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="搜索日报、Agent 输出或路径" />
+            <Input
+              className="pl-9"
+              value={search}
+              onChange={(event) => setSearch(event.target.value)}
+              placeholder="搜索日报、Agent 输出或路径"
+            />
           </div>
         </CardContent>
       </Card>
@@ -146,7 +154,10 @@ export default function KnowledgeBasePage() {
             ))}
           </div>
           <div className="text-xs text-muted-foreground">
-            已排除：{(config?.excluded_dirs ?? []).join(", ")}
+            扫描排除目录: {(config?.excluded_dirs ?? []).join(", ")}
+          </div>
+          <div className="text-xs text-muted-foreground">
+            最近文件上限: {config?.max_recent_files ?? 50}，默认资产上限: {config?.default_asset_limit ?? 50}
           </div>
         </CardContent>
       </Card>

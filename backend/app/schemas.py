@@ -19,6 +19,10 @@ class AgentBase(BaseModel):
     tools_json: str = "[]"
     prompts_json: str = "[]"
     workflow_json: str = "{}"
+    timeout_seconds: int = 1800
+    retry_enabled: bool = False
+    max_retries: int = 0
+    retry_delay_seconds: int = 30
 
 
 class AgentCreate(AgentBase):
@@ -40,6 +44,10 @@ class AgentUpdate(BaseModel):
     tools_json: str | None = None
     prompts_json: str | None = None
     workflow_json: str | None = None
+    timeout_seconds: int | None = None
+    retry_enabled: bool | None = None
+    max_retries: int | None = None
+    retry_delay_seconds: int | None = None
 
 
 class AgentRead(AgentBase):
@@ -68,6 +76,18 @@ class AgentRunRead(BaseModel):
     output_files_json: str = "[]"
     error_message: str = ""
     created_at: datetime
+    retry_count: int = 0
+    parent_run_id: int | None = None
+    timeout_seconds: int | None = None
+    cancelled_by: str = ""
+    metadata_json: str = "{}"
+    llm_provider: str = ""
+    llm_model: str = ""
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    total_tokens: int = 0
+    estimated_cost: float = 0
+    cost_currency: str = "USD"
 
 
 class AgentRunStartRead(BaseModel):
@@ -87,6 +107,8 @@ class AgentRunQueueItem(BaseModel):
     command: str = ""
     output_summary: str = ""
     error_message: str = ""
+    retry_count: int = 0
+    timeout_seconds: int | None = None
 
 
 class AgentRunQueueRead(BaseModel):
@@ -95,6 +117,8 @@ class AgentRunQueueRead(BaseModel):
     recently_finished_runs: list[AgentRunQueueItem] = Field(default_factory=list)
     active_count: int = 0
     pending_count: int = 0
+    running_count: int = 0
+    max_concurrent_runs: int = 2
     failed_count_today: int = 0
     success_count_today: int = 0
 
@@ -196,6 +220,62 @@ class KnowledgeAssetRead(BaseModel):
     created_at: datetime
 
 
+class RunArtifactRead(BaseModel):
+    title: str
+    file_path: str
+    asset_type: str = "markdown"
+    file_exists: bool = False
+    file_size: int = 0
+    modified_at: float | None = None
+    preview: str = ""
+    warning: str = ""
+    readable: bool = False
+
+
+class AgentRunDetailRead(AgentRunRead):
+    agent: AgentRead | None = None
+    logs: list[AgentLogRead] = Field(default_factory=list)
+    knowledge_assets: list[KnowledgeAssetRead] = Field(default_factory=list)
+
+
+class AgentMetricsRead(BaseModel):
+    agent_id: str
+    total_runs: int = 0
+    success_runs: int = 0
+    failed_runs: int = 0
+    cancelled_runs: int = 0
+    timeout_runs: int = 0
+    success_rate: float = 0
+    failure_rate: float = 0
+    average_duration_seconds: float = 0
+    last_run_at: datetime | None = None
+    last_success_at: datetime | None = None
+    last_failed_at: datetime | None = None
+    total_generated_assets: int = 0
+    total_estimated_cost: float = 0
+    total_tokens: int = 0
+    recent_7_days_runs: int = 0
+    recent_7_days_success_rate: float = 0
+
+
+class MetricsOverviewRead(BaseModel):
+    total_agents: int = 0
+    enabled_agents: int = 0
+    total_runs: int = 0
+    runs_today: int = 0
+    success_today: int = 0
+    failed_today: int = 0
+    cancelled_today: int = 0
+    running_count: int = 0
+    pending_count: int = 0
+    total_generated_assets: int = 0
+    average_duration_seconds: float = 0
+    total_estimated_cost: float = 0
+    total_tokens: int = 0
+    recent_7_days_runs: int = 0
+    recent_7_days_success_rate: float = 0
+
+
 class SettingsRead(BaseModel):
     knowledge_base_root: str
     python_path: str
@@ -204,6 +284,12 @@ class SettingsRead(BaseModel):
     database_url: str
     required_env: list[str] = Field(default_factory=list)
     security_notes: list[str] = Field(default_factory=list)
+    max_concurrent_runs: int = 2
+    default_timeout_seconds: int = 1800
+    excluded_dirs: list[str] = Field(default_factory=list)
+    excluded_files: list[str] = Field(default_factory=list)
+    max_recent_files: int = 50
+    default_asset_limit: int = 50
 
 
 class SettingsUpdate(BaseModel):
@@ -211,6 +297,12 @@ class SettingsUpdate(BaseModel):
     python_path: str | None = None
     default_output_dir: str | None = None
     llm_provider: str | None = None
+    max_concurrent_runs: int | None = None
+    default_timeout_seconds: int | None = None
+    excluded_dirs: list[str] | None = None
+    excluded_files: list[str] | None = None
+    max_recent_files: int | None = None
+    default_asset_limit: int | None = None
 
 
 class ApiMessage(BaseModel):

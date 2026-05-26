@@ -5,6 +5,7 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.models import KnowledgeAsset
 from app.services.knowledge_base_service import CATEGORY_DIRS, enrich_asset, get_kb_config, scan_recent_markdown
+from app.services.settings_service import runtime_kb_scan_settings
 
 router = APIRouter()
 
@@ -19,7 +20,7 @@ def _category_path(category: str | None) -> str | None:
 def list_assets(
     category: str | None = None,
     search: str | None = None,
-    limit: int = Query(default=50, le=200),
+    limit: int | None = Query(default=None, le=200),
     db: Session = Depends(get_db),
 ) -> list[dict]:
     query = db.query(KnowledgeAsset)
@@ -29,7 +30,8 @@ def list_assets(
     if search:
         like = f"%{search}%"
         query = query.filter(or_(KnowledgeAsset.title.like(like), KnowledgeAsset.file_path.like(like)))
-    assets = query.order_by(KnowledgeAsset.created_at.desc()).limit(limit).all()
+    resolved_limit = limit or runtime_kb_scan_settings()["default_asset_limit"]
+    assets = query.order_by(KnowledgeAsset.created_at.desc()).limit(resolved_limit).all()
     return [enrich_asset(asset) for asset in assets]
 
 
@@ -37,9 +39,10 @@ def list_assets(
 def recent_files(
     category: str | None = None,
     search: str | None = None,
-    limit: int = Query(default=50, le=200),
+    limit: int | None = Query(default=None, le=200),
 ) -> list[dict]:
-    return scan_recent_markdown(limit=limit, category=category, search=search)
+    resolved_limit = limit or runtime_kb_scan_settings()["max_recent_files"]
+    return scan_recent_markdown(limit=resolved_limit, category=category, search=search)
 
 
 @router.get("/config")

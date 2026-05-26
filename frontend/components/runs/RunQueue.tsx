@@ -1,6 +1,6 @@
 "use client";
 
-import { Clock, ListChecks, XCircle, CheckCircle2 } from "lucide-react";
+import { CheckCircle2, Clock, Gauge, ListChecks, XCircle } from "lucide-react";
 
 import { CancelRunButton } from "@/components/runs/CancelRunButton";
 import { RunStatusBadge } from "@/components/runs/RunStatusBadge";
@@ -34,6 +34,8 @@ function QueueRunRow({
         </div>
         <div className="mt-1 text-xs text-muted-foreground">
           started {formatDate(item.started_at)} · {elapsedSeconds(item).toFixed(0)}s
+          {item.timeout_seconds ? ` · timeout ${item.timeout_seconds}s` : ""}
+          {item.retry_count ? ` · retry #${item.retry_count}` : ""}
         </div>
         {item.error_message && <div className="mt-2 text-xs text-red-700">{item.error_message}</div>}
       </div>
@@ -69,14 +71,16 @@ export function RunQueue({
   const running = queue?.running_runs ?? [];
   const pending = queue?.pending_runs ?? [];
   const finished = queue?.recently_finished_runs ?? [];
+
   return (
     <Card>
       <CardHeader>
         <CardTitle>运行队列</CardTitle>
       </CardHeader>
       <CardContent className="flex flex-col gap-4">
-        <div className="grid gap-3 md:grid-cols-4">
-          <Stat label="当前活跃" value={queue?.active_count ?? 0} icon={Clock} />
+        <div className="grid gap-3 md:grid-cols-5">
+          <Stat label="当前运行数" value={queue?.running_count ?? queue?.active_count ?? 0} icon={Clock} />
+          <Stat label="最大并发数" value={queue?.max_concurrent_runs ?? 2} icon={Gauge} />
           <Stat label="等待中" value={queue?.pending_count ?? 0} icon={ListChecks} />
           <Stat label="今日成功" value={queue?.success_count_today ?? 0} icon={CheckCircle2} />
           <Stat label="今日失败" value={queue?.failed_count_today ?? 0} icon={XCircle} />

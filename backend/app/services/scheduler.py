@@ -5,7 +5,7 @@ from apscheduler.triggers.cron import CronTrigger
 
 from app.database import SessionLocal
 from app.models import Schedule
-from app.services.agent_runner import run_agent
+from app.services.agent_runner import start_agent_run
 from app.services.log_service import create_log
 
 _scheduler = BackgroundScheduler(timezone="Asia/Shanghai")
@@ -19,12 +19,12 @@ def _job_id(schedule_id: int) -> str:
 def _run_scheduled_agent(schedule_id: int, agent_id: str) -> None:
     db = SessionLocal()
     try:
-        run = run_agent(db, agent_id)
+        run = start_agent_run(db, agent_id)
         schedule = db.query(Schedule).filter(Schedule.id == schedule_id).first()
         if schedule:
             schedule.last_run_at = datetime.utcnow()
             db.commit()
-        create_log(db, agent_id, f"Scheduled run completed: {run.status}", "info", run.id)
+        create_log(db, agent_id, f"Scheduled run queued: {run.status}", "info", run.id)
     except Exception as exc:
         create_log(db, agent_id, f"Scheduled run failed: {exc}", "error")
     finally:

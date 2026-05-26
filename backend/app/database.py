@@ -1,7 +1,7 @@
 from collections.abc import Generator
 from pathlib import Path
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
 from app.config import settings
@@ -39,6 +39,49 @@ def init_db() -> None:
     from app import models  # noqa: F401
 
     Base.metadata.create_all(bind=engine)
+    upgrade_schema()
+
+
+def _columns(table_name: str) -> set[str]:
+    with engine.connect() as connection:
+        rows = connection.execute(text(f"PRAGMA table_info({table_name})")).fetchall()
+    return {row[1] for row in rows}
+
+
+def _add_column(table_name: str, column_name: str, definition: str) -> None:
+    if column_name in _columns(table_name):
+        return
+    with engine.begin() as connection:
+        connection.execute(text(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {definition}"))
+
+
+def upgrade_schema() -> None:
+    if not database_url.startswith("sqlite"):
+        return
+    agent_columns = {
+        "timeout_seconds": "INTEGER DEFAULT 1800",
+        "retry_enabled": "BOOLEAN DEFAULT 0",
+        "max_retries": "INTEGER DEFAULT 0",
+        "retry_delay_seconds": "INTEGER DEFAULT 30",
+    }
+    run_columns = {
+        "retry_count": "INTEGER DEFAULT 0",
+        "parent_run_id": "INTEGER",
+        "timeout_seconds": "INTEGER",
+        "cancelled_by": "VARCHAR(120) DEFAULT ''",
+        "metadata_json": "TEXT DEFAULT '{}'",
+        "llm_provider": "VARCHAR(120) DEFAULT ''",
+        "llm_model": "VARCHAR(200) DEFAULT ''",
+        "prompt_tokens": "INTEGER DEFAULT 0",
+        "completion_tokens": "INTEGER DEFAULT 0",
+        "total_tokens": "INTEGER DEFAULT 0",
+        "estimated_cost": "FLOAT DEFAULT 0",
+        "cost_currency": "VARCHAR(20) DEFAULT 'USD'",
+    }
+    for name, definition in agent_columns.items():
+        _add_column("agents", name, definition)
+    for name, definition in run_columns.items():
+        _add_column("agent_runs", name, definition)
 
 
 def get_db() -> Generator[Session, None, None]:

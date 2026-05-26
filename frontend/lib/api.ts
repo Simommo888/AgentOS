@@ -2,11 +2,15 @@ import type {
   Agent,
   AgentHealth,
   AgentLog,
+  AgentMetrics,
   AgentRun,
   AgentRunStart,
   KnowledgeAsset,
+  MetricsOverview,
   Prompt,
   RecentFile,
+  RunArtifact,
+  RunDetail,
   RunQueue,
   Schedule,
   Settings,
@@ -41,6 +45,7 @@ export const api = {
   agents: () => request<Agent[]>("/api/agents"),
   agent: (id: string) => request<Agent>(`/api/agents/${id}`),
   agentHealth: (id: string) => request<AgentHealth>(`/api/agents/${id}/health`),
+  agentMetrics: (id: string) => request<AgentMetrics>(`/api/agents/${id}/metrics`),
   createAgent: (payload: Partial<Agent> & { id: string }) =>
     request<Agent>("/api/agents", { method: "POST", body: JSON.stringify(payload) }),
   updateAgent: (id: string, payload: Partial<Agent>) =>
@@ -58,7 +63,9 @@ export const api = {
     return request<AgentRun[]>(`/api/runs${suffix}`);
   },
   runQueue: () => request<RunQueue>("/api/runs/queue"),
-  run: (id: number) => request<AgentRun>(`/api/runs/${id}`),
+  run: (id: number) => request<RunDetail>(`/api/runs/${id}`),
+  getRun: (id: number) => request<RunDetail>(`/api/runs/${id}`),
+  getRunArtifacts: (id: number) => request<RunArtifact[]>(`/api/runs/${id}/artifacts`),
   cancelRun: (id: number) => request<AgentRun>(`/api/runs/${id}/cancel`, { method: "POST" }),
   runLogs: (id: number) => request<AgentLog[]>(`/api/runs/${id}/logs`),
   logs: () => request<AgentLog[]>("/api/logs"),
@@ -98,6 +105,9 @@ export const api = {
   updateToolPermission: (id: number, payload: Partial<ToolPermission>) =>
     request<ToolPermission>(`/api/tools/permissions/${id}`, { method: "PUT", body: JSON.stringify(payload) }),
   settings: () => request<Settings>("/api/settings"),
+  metricsOverview: () => request<MetricsOverview>("/api/metrics/overview"),
+  getMetricsOverview: () => request<MetricsOverview>("/api/metrics/overview"),
   updateSettings: (payload: Partial<Settings>) =>
-    request<Settings>("/api/settings", { method: "PUT", body: JSON.stringify(payload) })
+    request<Settings>("/api/settings", { method: "PUT", body: JSON.stringify(payload) }),
+  resetKbScanSettings: () => request<Settings>("/api/settings/knowledge-base/reset-scan", { method: "POST" })
 };
